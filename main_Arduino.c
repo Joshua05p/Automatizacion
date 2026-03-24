@@ -8,7 +8,7 @@
 /*
  * Automatizacion.c
  */
-
+#define F_CPU 16000000
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <stdlib.h>
@@ -16,7 +16,11 @@
 #define MAX_DUTY 1000
 #define MIN_DUTY 0
 #define FACTOR 250
+
 #define LED_PIN PD7
+#define LED1 PD7
+#define LED2 PC0
+#define LED3 PC1
 #define NUM_LEDS 8
 
 /****************************************/
@@ -30,6 +34,13 @@ volatile uint16_t duty2 = 0;
 volatile uint16_t duty3 = 0;
 
 volatile uint16_t contador_ms = 0;
+
+volatile uint8_t actualizar_leds = 0;
+volatile uint8_t led_actual = 0;
+
+volatile uint8_t estado_anterior = 0xFF;
+
+volatile uint16_t temperatura = 0;
 
 
 /****************************************/
@@ -48,6 +59,7 @@ void salidas(void){
 	DDRB |= (1<<DDB0) | (1<<DDB3) | (1<<DDB4);
 	
 	DDRD |= (1<<DDD7);
+	DDRC |= (1<<LED2)|(1<<LED3);
 
 	// Interrupciones
 	PCICR |= (1 << PCIE2);
@@ -56,60 +68,63 @@ void salidas(void){
 	sei();
 }
 
-void enviar_bit_1(){
-	PORTD |= (1<<LED_PIN);
-	_delay_us(0.8);
-	PORTD &= ~(1<<LED_PIN);
-	_delay_us(0.45);
-}
-
-void enviar_bit_0(){
-	PORTD |= (1<<LED_PIN);
-	_delay_us(0.4);
-	PORTD &= ~(1<<LED_PIN);
-	_delay_us(0.85);
-}
-
 void enviar_byte(uint8_t byte){
-	for(uint8_t i=0;i<8;i++){
-		if(byte & (1<<(7-i))){
-			enviar_bit_1();
+	for(uint8_t i = 0; i < 8; i++){
+		if(byte & 0x80){
+			PORTD |= (1<<LED_PIN);
+			asm volatile ("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n");
+			PORTD &= ~(1<<LED_PIN);
+			asm volatile ("nop\nnop\nnop\nnop\nnop\n");
 			}else{
-			enviar_bit_0();
+			PORTD |= (1<<LED_PIN);
+			asm volatile ("nop\nnop\nnop\nnop\n");
+			PORTD &= ~(1<<LED_PIN);
+			asm volatile ("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n");
 		}
+		byte <<= 1;
 	}
 }
 
 void enviar_color(uint8_t r, uint8_t g, uint8_t b){
-	// WS2812 usa GRB
 	enviar_byte(g);
 	enviar_byte(r);
 	enviar_byte(b);
 }
-void mostrar_barra(uint16_t duty){
-	uint8_t leds_encendidos = (duty * NUM_LEDS) / MAX_DUTY;
 
-	cli(); // timing crítico
+void mostrar_porcentaje(uint16_t duty){
 
-	for(uint8_t i=0; i<NUM_LEDS; i++){
-		if(i < leds_encendidos){
-			enviar_color(0, 50, 0); // verde
-			}else{
-			enviar_color(0, 0, 0); // apagado
+	uint16_t valor = duty * NUM_LEDS;
+
+	uint8_t leds_completos = valor / MAX_DUTY;
+	uint8_t brillo_parcial = ((valor % MAX_DUTY) * 20) / MAX_DUTY; // 0–10
+
+	cli();
+
+	for(uint8_t i = 0; i < NUM_LEDS; i++){
+
+		if(i < leds_completos){
+			enviar_color(0, 10, 0); 
+		}
+		else if(i == leds_completos){
+			enviar_color(0, brillo_parcial, 0); 
+		}
+		else{
+			enviar_color(0, 0, 0);
 		}
 	}
 
 	sei();
 
-	_delay_us(50); // reset latch
+	for(uint16_t i=0;i<800;i++) asm volatile("nop");
 }
 
 // ?? TIMER1 ? PWM 1 y 2 (1kHz)
 void confi_timer1(void){
+	// Fast PWM, TOP = ICR1
 	TCCR1A = (1<<COM1A1)|(1<<COM1B1)|(1<<WGM11);
 	TCCR1B = (1<<WGM13)|(1<<WGM12)|(1<<CS11); // prescaler 8
 
-	ICR1 = 1000;
+	ICR1 = 666; // ?? ~1.5 kHz
 
 	OCR1A = duty1;
 	OCR1B = duty2;
@@ -117,11 +132,14 @@ void confi_timer1(void){
 
 // ?? TIMER2 ? PWM 3 (1kHz aprox)
 void confi_timer2(void){
+	// Fast PWM, TOP = OCR2A
 	TCCR2A = (1<<COM2B1)|(1<<WGM21)|(1<<WGM20);
-	TCCR2B = (1<<CS21); // prescaler 8
+	TCCR2B = (1<<CS21) | (1<<CS20); // ?? prescaler 32
 
-	OCR2A = 249; // ~1kHz
-	OCR2B = duty3/4; // ajustar escala (0-255)
+	OCR2A = 166; // ?? ~1.5 kHz
+
+	// Escala correcta de 0–1000 ? 0–166
+	OCR2B = (duty3 * OCR2A) / MAX_DUTY;
 }
 
 // ?? TIMER0 ? tiempo
@@ -171,12 +189,17 @@ int main(void)
 	confi_timer0();
 
 	
-	USART_init(51);
+	USART_init(103);
 
 	sei();
 
 	while (1)
 	{
+		mostrar_porcentaje(duty1);
+		if (actualizar_leds){
+			mostrar_porcentaje(duty1);
+			actualizar_leds = 0;
+		}
 	}
 }
 
@@ -186,46 +209,50 @@ int main(void)
 
 ISR(PCINT2_vect)
 {
-	// PWM1
-	if (!(PIND & (1<<PIND2))){
-		start1 ^= 1;
+	uint8_t estado_actual = PIND;
 
-		if (start1){
-			PORTB |= (1<<PORTB0); // 🔥 LED1 ON
-		}
-	}
+	// detectar flanco de bajada
+	uint8_t cambio = estado_anterior & (~estado_actual);
 
-	// PWM2
-	if (!(PIND & (1<<PIND4))){
+	// PWM1 (PD2)
+	if (cambio & (1<<PIND2)){
 		start2 ^= 1;
-
-		if (start2){
-			PORTB |= (1<<PORTB3); // 🔥 LED2 ON
-		}
+		actualizar_leds = 1;
+		if (start2) PORTB |= (1<<PORTB0);
+		else        PORTB &= ~(1<<PORTB0);
 	}
 
-	// PWM3
-	if (!(PIND & (1<<PIND5))){
+	// PWM2 (PD4)
+	if (cambio & (1<<PIND4)){
+		start1 ^= 1;
+		actualizar_leds = 1;
+		if (start1) PORTB |= (1<<PORTB3);
+		else        PORTB &= ~(1<<PORTB3);
+	}
+
+	// PWM3 (PD5)
+	if (cambio & (1<<PIND5)){
 		start3 ^= 1;
 
-		if (start3){
-			PORTB |= (1<<PORTB4); // 🔥 LED3 ON
-		}
+		if (start3) PORTB |= (1<<PORTB4);
+		else        PORTB &= ~(1<<PORTB4);
 	}
 
-	// RESET
-	if (!(PIND & (1<<PIND6))){
+	// RESET (PD6)
+	if (cambio & (1<<PIND6)){
 		start1 = start2 = start3 = 0;
 		duty1 = duty2 = duty3 = 0;
+		temperatura = 0;
+		actualizar_leds = 1;
 
 		OCR1A = 0;
 		OCR1B = 0;
 		OCR2B = 0;
 
-		// 🔥 APAGAR LEDs
 		PORTB &= ~((1<<PORTB0)|(1<<PORTB3)|(1<<PORTB4));
 	}
-	mostrar_barra(duty1);
+
+	estado_anterior = estado_actual;
 }
 /****************************************/
 // CURVA SUAVE
@@ -234,7 +261,7 @@ ISR(TIMER0_COMPA_vect)
 {
 	contador_ms++;
 
-	if (contador_ms >= 250)
+	if (contador_ms >= 20)
 	{
 		contador_ms = 0;
 
@@ -247,6 +274,10 @@ ISR(TIMER0_COMPA_vect)
 
 		// PWM2
 		if (start2){
+			temperatura++;
+			if(temperatura >= 800){
+				temperatura = 800;
+			}
 			duty2 += (MAX_DUTY - duty2)/FACTOR;
 			if ((MAX_DUTY - duty2) < 2) duty2 = MAX_DUTY;
 			OCR1B = duty2;
@@ -256,10 +287,10 @@ ISR(TIMER0_COMPA_vect)
 		if (start3){
 			duty3 += (MAX_DUTY - duty3)/FACTOR;
 			if ((MAX_DUTY - duty3) < 2) duty3 = MAX_DUTY;
-			OCR2B = duty3/4; // escala a 8 bits
+			OCR2B = (duty3 * OCR2A) / MAX_DUTY;
 		}
-			USART_sendString("Duty: ");
-			USART_sendNumber(duty1);
-			USART_sendString("\r\n");
 	}
+	actualizar_leds = 1;
+	USART_sendNumber(temperatura);
+	USART_sendString("\n");
 }
