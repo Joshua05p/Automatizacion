@@ -18,7 +18,6 @@
 #define FACTOR 250
 
 #define LED_PIN PD7
-#define LED1 PD7
 #define LED2 PC0
 #define LED3 PC1
 #define NUM_LEDS 8
