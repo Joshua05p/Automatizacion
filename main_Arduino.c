@@ -12,52 +12,134 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <stdlib.h>
+#include <util/delay.h>
+#define MAX_DUTY 1000
+#define MIN_DUTY 0
+#define FACTOR 250
+#define LED_PIN PD7
+#define NUM_LEDS 8
 
 /****************************************/
 // Variables
+volatile uint8_t start1 = 0;
+volatile uint8_t start2 = 0;
+volatile uint8_t start3 = 0;
 
-volatile uint8_t iniciar_pwm = 0;
-volatile uint16_t duty = 1000;  // valor inicial (?s aprox)
+volatile uint16_t duty1 = 0;
+volatile uint16_t duty2 = 0;
+volatile uint16_t duty3 = 0;
+
 volatile uint16_t contador_ms = 0;
+
 
 /****************************************/
 // CONFIGURACIONES
 
-void salidas(void) {
-	// OC1A (PB1) como salida PWM
-	DDRB |= (1 << DDB1);
+void salidas(void){
+	// PWM salidas
+	DDRB |= (1 << DDB1) | (1 << DDB2); // OC1A, OC1B
+	DDRD |= (1 << DDD3);              // OC2B
 
-	// Botón PD2
-	DDRD &= ~(1 << DDD2);
-	PORTD |= (1 << PORTD2);
+	// Botones (PD2, PD4, PD5, PD6)
+	DDRD &= ~((1<<DDD2)|(1<<DDD4)|(1<<DDD5)|(1<<DDD6));
+	PORTD |= (1<<PORTD2)|(1<<PORTD4)|(1<<PORTD5)|(1<<PORTD6);
+	
+	//Indicador Valvulas
+	DDRB |= (1<<DDB0) | (1<<DDB3) | (1<<DDB4);
+	
+	DDRD |= (1<<DDD7);
 
-	// Interrupción por cambio
+	// Interrupciones
 	PCICR |= (1 << PCIE2);
-	PCMSK2 |= (1 << PCINT18);
+	PCMSK2 |= (1<<PCINT18)|(1<<PCINT20)|(1<<PCINT21)|(1<<PCINT22);
 
 	sei();
 }
 
-// ?? TIMER1 ? PWM 50ms
-void confi_timer1(void){
-	// Fast PWM, TOP = ICR1
-	TCCR1A = (1 << COM1A1) | (1 << WGM11);
-	TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS12); // prescaler 256
-
-	// Calculo:
-	// 16MHz / 256 = 62500 Hz
-	// 50ms ? 0.05 * 62500 = 3125
-	ICR1 = 3125;
-
-	OCR1A = duty; // duty inicial
+void enviar_bit_1(){
+	PORTD |= (1<<LED_PIN);
+	_delay_us(0.8);
+	PORTD &= ~(1<<LED_PIN);
+	_delay_us(0.45);
 }
 
+void enviar_bit_0(){
+	PORTD |= (1<<LED_PIN);
+	_delay_us(0.4);
+	PORTD &= ~(1<<LED_PIN);
+	_delay_us(0.85);
+}
+
+void enviar_byte(uint8_t byte){
+	for(uint8_t i=0;i<8;i++){
+		if(byte & (1<<(7-i))){
+			enviar_bit_1();
+			}else{
+			enviar_bit_0();
+		}
+	}
+}
+
+void enviar_color(uint8_t r, uint8_t g, uint8_t b){
+	// WS2812 usa GRB
+	enviar_byte(g);
+	enviar_byte(r);
+	enviar_byte(b);
+}
+void mostrar_barra(uint16_t duty){
+	uint8_t leds_encendidos = (duty * NUM_LEDS) / MAX_DUTY;
+
+	cli(); // timing crítico
+
+	for(uint8_t i=0; i<NUM_LEDS; i++){
+		if(i < leds_encendidos){
+			enviar_color(0, 50, 0); // verde
+			}else{
+			enviar_color(0, 0, 0); // apagado
+		}
+	}
+
+	sei();
+
+	_delay_us(50); // reset latch
+}
+
+// ?? TIMER1 ? PWM 1 y 2 (1kHz)
+void confi_timer1(void){
+	TCCR1A = (1<<COM1A1)|(1<<COM1B1)|(1<<WGM11);
+	TCCR1B = (1<<WGM13)|(1<<WGM12)|(1<<CS11); // prescaler 8
+
+	ICR1 = 1000;
+
+	OCR1A = duty1;
+	OCR1B = duty2;
+}
+
+// ?? TIMER2 ? PWM 3 (1kHz aprox)
+void confi_timer2(void){
+	TCCR2A = (1<<COM2B1)|(1<<WGM21)|(1<<WGM20);
+	TCCR2B = (1<<CS21); // prescaler 8
+
+	OCR2A = 249; // ~1kHz
+	OCR2B = duty3/4; // ajustar escala (0-255)
+}
+
+// ?? TIMER0 ? tiempo
+void confi_timer0(void){
+	TCCR0A = (1<<WGM01);
+	TCCR0B = (1<<CS01)|(1<<CS00);
+
+	OCR0A = 124; // 1ms
+	TIMSK0 |= (1<<OCIE0A);
+}
+
+// USART (igual)
 void USART_init(unsigned int ubrr){
 	UBRR0H = (ubrr >> 8);
 	UBRR0L = ubrr;
 
-	UCSR0B = (1 << TXEN0); // solo transmisión
-	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // 8 bits
+	UCSR0B = (1 << TXEN0);
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
 
 void USART_sendChar(char c){
@@ -77,18 +159,6 @@ void USART_sendNumber(uint16_t num){
 	USART_sendString(buffer);
 }
 
-// ?? TIMER0 ? base de tiempo (1ms)
-void confi_timer0(void){
-	// CTC
-	TCCR0A = (1 << WGM01);
-	TCCR0B = (1 << CS01) | (1 << CS00); // prescaler 64
-
-	// 16MHz / 64 = 250kHz
-	// 1ms ? 250 cuentas
-	OCR0A = 249;
-
-	TIMSK0 |= (1 << OCIE0A);
-}
 
 /****************************************/
 // MAIN
@@ -97,10 +167,11 @@ int main(void)
 {
 	salidas();
 	confi_timer1();
+	confi_timer2();
 	confi_timer0();
 
 	
-	USART_init(103);
+	USART_init(51);
 
 	sei();
 
@@ -111,45 +182,84 @@ int main(void)
 
 /****************************************/
 // INTERRUPCIONES
+// BOTONES
 
-// BOTÓN
 ISR(PCINT2_vect)
 {
-	if (!(PIND & (1 << PIND2)))
-	{
-		iniciar_pwm = 1;
-		duty = 500;
-		OCR1A = duty;
+	// PWM1
+	if (!(PIND & (1<<PIND2))){
+		start1 ^= 1;
 
-		USART_sendString("Inicio PWM\r\n");
+		if (start1){
+			PORTB |= (1<<PORTB0); // 🔥 LED1 ON
+		}
 	}
-}
 
-// TIMER0 cada 1 ms
+	// PWM2
+	if (!(PIND & (1<<PIND4))){
+		start2 ^= 1;
+
+		if (start2){
+			PORTB |= (1<<PORTB3); // 🔥 LED2 ON
+		}
+	}
+
+	// PWM3
+	if (!(PIND & (1<<PIND5))){
+		start3 ^= 1;
+
+		if (start3){
+			PORTB |= (1<<PORTB4); // 🔥 LED3 ON
+		}
+	}
+
+	// RESET
+	if (!(PIND & (1<<PIND6))){
+		start1 = start2 = start3 = 0;
+		duty1 = duty2 = duty3 = 0;
+
+		OCR1A = 0;
+		OCR1B = 0;
+		OCR2B = 0;
+
+		// 🔥 APAGAR LEDs
+		PORTB &= ~((1<<PORTB0)|(1<<PORTB3)|(1<<PORTB4));
+	}
+	mostrar_barra(duty1);
+}
+/****************************************/
+// CURVA SUAVE
+
 ISR(TIMER0_COMPA_vect)
 {
-	if (iniciar_pwm)
+	contador_ms++;
+
+	if (contador_ms >= 250)
 	{
-		contador_ms++;
+		contador_ms = 0;
 
-		if (contador_ms >= 1000) // 1 segundo
-		{
-			contador_ms = 0;
-
-			duty += 100;
-
-			if (duty >= 2500)
-			{
-				duty = 2500;
-				iniciar_pwm = 0;
-			}
-
-			OCR1A = duty;
-
-			
-			USART_sendString("Duty: ");
-			USART_sendNumber(duty);
-			USART_sendString("\r\n");
+		// PWM1
+		if (start1){
+			duty1 += (MAX_DUTY - duty1)/FACTOR;
+			if ((MAX_DUTY - duty1) < 2) duty1 = MAX_DUTY;
+			OCR1A = duty1;
 		}
+
+		// PWM2
+		if (start2){
+			duty2 += (MAX_DUTY - duty2)/FACTOR;
+			if ((MAX_DUTY - duty2) < 2) duty2 = MAX_DUTY;
+			OCR1B = duty2;
+		}
+
+		// PWM3
+		if (start3){
+			duty3 += (MAX_DUTY - duty3)/FACTOR;
+			if ((MAX_DUTY - duty3) < 2) duty3 = MAX_DUTY;
+			OCR2B = duty3/4; // escala a 8 bits
+		}
+			USART_sendString("Duty: ");
+			USART_sendNumber(duty1);
+			USART_sendString("\r\n");
 	}
 }
